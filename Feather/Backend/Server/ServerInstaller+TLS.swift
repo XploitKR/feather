@@ -101,35 +101,58 @@ extension ServerInstaller {
 		return nil
 	}
 	
+	/// LAN IPv4 used by the Semi Local server. Prefers Wi-Fi (en0) over cellular (pdp_ip0) and
+	/// skips addresses the device cannot be reached on: 192.0.0.0/29 is the 464XLAT CLAT range
+	/// (RFC 7335) that iOS assigns on IPv6-only cellular/Wi-Fi (e.g. 192.0.0.2), and 169.254.0.0/16
+	/// is link-local. Returns nil when nothing usable exists, so callers fall back to 127.0.0.1.
 	static func getLocalAddress() -> String? {
-		var address: String?
+		var wifi: String?
+		var cellular: String?
 		var ifaddr: UnsafeMutablePointer<ifaddrs>?
 		
-		if getifaddrs(&ifaddr) == 0 {
-			var ptr = ifaddr
-			while ptr != nil {
-				let interface = ptr!.pointee
-				let addrFamily = interface.ifa_addr.pointee.sa_family
-				
-				if addrFamily == UInt8(AF_INET) {
-					
-					let name = String(cString: interface.ifa_name)
-					if name == "en0" || name == "pdp_ip0" {
-						
-						var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-						if getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len),
-						               &hostname, socklen_t(hostname.count),
-						               nil, socklen_t(0), NI_NUMERICHOST) == 0 {
-							address = String(cString: hostname)
-						}
-						
-					}
-				}
-				ptr = ptr!.pointee.ifa_next
+		guard getifaddrs(&ifaddr) == 0 else {
+			return nil
+		}
+		defer { freeifaddrs(ifaddr) }
+		
+		var ptr = ifaddr
+		while let interface = ptr?.pointee {
+			defer { ptr = interface.ifa_next }
+			
+			guard
+				let addr = interface.ifa_addr,
+				addr.pointee.sa_family == UInt8(AF_INET)
+			else {
+				continue
 			}
-			freeifaddrs(ifaddr)
+			
+			let name = String(cString: interface.ifa_name)
+			guard name == "en0" || name == "pdp_ip0" else {
+				continue
+			}
+			
+			let ipv4 = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+				UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
+			}
+			if (ipv4 & 0xFFFF_FFF8) == 0xC000_0000 || (ipv4 & 0xFFFF_0000) == 0xA9FE_0000 {
+				continue
+			}
+			
+			var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+			guard getnameinfo(addr, socklen_t(addr.pointee.sa_len),
+			                  &hostname, socklen_t(hostname.count),
+			                  nil, socklen_t(0), NI_NUMERICHOST) == 0 else {
+				continue
+			}
+			
+			let address = String(cString: hostname)
+			if name == "en0" {
+				wifi = wifi ?? address
+			} else {
+				cellular = cellular ?? address
+			}
 		}
 		
-		return address
+		return wifi ?? cellular
 	}
 }
