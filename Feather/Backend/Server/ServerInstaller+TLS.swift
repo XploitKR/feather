@@ -34,7 +34,10 @@ extension ServerInstaller {
 		
 		app.http.server.configuration.hostname = sni()
 		app.http.server.configuration.tcpNoDelay = true
-		app.http.server.configuration.address = .hostname("0.0.0.0", port: port)
+		// "::" is dual-stack on Darwin (IPV6_V6ONLY=0): it accepts 127.0.0.1 and ::1. *.backloop.dev
+		// also resolves to ::1 (AAAA), which IPv6-first (e.g. IPv6-only cellular) clients try first;
+		// an IPv4-only "0.0.0.0" listener refuses that connection.
+		app.http.server.configuration.address = .hostname("::", port: port)
 		app.http.server.configuration.port = port
 		app.routes.defaultMaxBodySize = "128mb"
 		app.routes.caseInsensitive = false
