@@ -243,3 +243,78 @@ bad:
 	close(fd);
 	return resultXML;
 }
+
+#pragma mark - Force SDK (any version)
+
+static NSString *PatchSliceSDKVersion(uint8_t *mapped, size_t fileSize, uint64_t offset, uint32_t index, uint32_t sdk) {
+	if (offset + sizeof(struct mach_header_64) > fileSize) {
+		return [NSString stringWithFormat:@"Slice %u: invalid offset", index];
+	}
+	struct mach_header_64 *header = (struct mach_header_64 *)(mapped + offset);
+	if (header->magic != MH_MAGIC_64) {
+		return [NSString stringWithFormat:@"Slice %u: not a 64-bit Mach-O", index];
+	}
+	uint8_t *cursor = mapped + offset + sizeof(struct mach_header_64);
+	uint8_t *end = cursor + header->sizeofcmds;
+	if ((size_t)(end - mapped) > fileSize) {
+		return [NSString stringWithFormat:@"Slice %u: load commands exceed file size", index];
+	}
+	BOOL patched = NO;
+	for (uint32_t i = 0; i < header->ncmds && cursor + sizeof(struct load_command) <= end; i++) {
+		struct load_command *cmd = (struct load_command *)cursor;
+		if (cmd->cmdsize < sizeof(struct load_command) || cursor + cmd->cmdsize > end) break;
+		if (cmd->cmd == LC_BUILD_VERSION && cmd->cmdsize >= sizeof(struct build_version_command)) {
+			((struct build_version_command *)cmd)->sdk = sdk;
+			patched = YES;
+		} else if (cmd->cmd == LC_VERSION_MIN_IPHONEOS && cmd->cmdsize >= sizeof(struct version_min_command)) {
+			((struct version_min_command *)cmd)->sdk = sdk;
+			patched = YES;
+		}
+		cursor += cmd->cmdsize;
+	}
+	return patched ? nil : [NSString stringWithFormat:@"Slice %u: no SDK load command", index];
+}
+
+NSString *LCPatchMachOSDKVersion(const char *path, uint32_t sdk) {
+	int fd = open(path, O_RDWR, 0600);
+	if (fd < 0) {
+		return [NSString stringWithFormat:@"Failed to open %s: %s", path, strerror(errno)];
+	}
+	struct stat s = {0};
+	if (fstat(fd, &s) != 0 || s.st_size < (off_t)sizeof(uint32_t)) {
+		close(fd);
+		return [NSString stringWithFormat:@"Failed to stat %s", path];
+	}
+	uint8_t *map = mmap(NULL, s.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (map == MAP_FAILED) {
+		close(fd);
+		return [NSString stringWithFormat:@"Failed to map %s: %s", path, strerror(errno)];
+	}
+	NSMutableArray<NSString *> *errors = [NSMutableArray array];
+	uint32_t magic = *(uint32_t *)map;
+	if (magic == FAT_CIGAM || magic == FAT_MAGIC || magic == FAT_CIGAM_64 || magic == FAT_MAGIC_64) {
+		BOOL is64 = (magic == FAT_CIGAM_64 || magic == FAT_MAGIC_64);
+		uint32_t nfat = OSSwapBigToHostInt32(((struct fat_header *)map)->nfat_arch);
+		for (uint32_t i = 0; i < nfat; i++) {
+			uint64_t sliceOffset;
+			if (is64) {
+				struct fat_arch_64 *arch = (struct fat_arch_64 *)(map + sizeof(struct fat_header)) + i;
+				sliceOffset = OSSwapBigToHostInt64(arch->offset);
+			} else {
+				struct fat_arch *arch = (struct fat_arch *)(map + sizeof(struct fat_header)) + i;
+				sliceOffset = OSSwapBigToHostInt32(arch->offset);
+			}
+			NSString *error = PatchSliceSDKVersion(map, s.st_size, sliceOffset, i, sdk);
+			if (error) [errors addObject:error];
+		}
+	} else if (magic == MH_MAGIC_64) {
+		NSString *error = PatchSliceSDKVersion(map, s.st_size, 0, 0, sdk);
+		if (error) [errors addObject:error];
+	} else {
+		[errors addObject:[NSString stringWithFormat:@"Unsupported binary format %s", path]];
+	}
+	msync(map, s.st_size, MS_SYNC);
+	munmap(map, s.st_size);
+	close(fd);
+	return errors.count ? [errors componentsJoinedByString:@"\n"] : nil;
+}

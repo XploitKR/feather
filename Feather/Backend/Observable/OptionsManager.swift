@@ -128,6 +128,8 @@ struct Options: Codable, Equatable {
 	var experiment_disableLiquidGlass: Bool
 	/// Modifies application to use ElleKit instead of CydiaSubstrate
 	var experiment_replaceSubstrateWithEllekit: Bool
+	/// Forces the iOS 27.1 SDK so apps adapt natively to iPhone Duo; legacy (non-UIScene) apps also get the FDSceneFix shim
+	var experiment_forceSDK27: Bool
 	
 	// MARK: Post Modifications
 	
@@ -172,6 +174,7 @@ struct Options: Codable, Equatable {
 		experiment_supportLiquidGlass: false,
 		experiment_disableLiquidGlass: false,
 		experiment_replaceSubstrateWithEllekit: false,
+		experiment_forceSDK27: false,
 		
 		// MARK: Post Modifications
 		

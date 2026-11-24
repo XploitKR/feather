@@ -192,9 +192,20 @@ struct SigningOptionsView: View {
 				systemImage: "26.circle",
 				isOn: $options.experiment_supportLiquidGlass,
 				temporaryValue: temporaryOptions?.experiment_supportLiquidGlass
-			).disabled(options.experiment_disableLiquidGlass)
+			).disabled(options.experiment_disableLiquidGlass || options.experiment_forceSDK27)
+			
+			_toggle(
+				.localized("Force iOS 27 SDK (iPhone Duo)"),
+				systemImage: "27.circle",
+				isOn: $options.experiment_forceSDK27,
+				temporaryValue: temporaryOptions?.experiment_forceSDK27
+			).disabled(options.experiment_supportLiquidGlass)
 		} footer: {
-			Text(.localized("This option force converts apps to try to use the new liquid glass redesign iOS 26 introduced, this may not work for all applications due to differing frameworks."))
+			Text(
+				String.localized("This option force converts apps to try to use the new liquid glass redesign iOS 26 introduced, this may not work for all applications due to differing frameworks.")
+				+ "\n\n"
+				+ String.localized("Force iOS 27 SDK makes apps adapt natively to iPhone Duo instead of the compatibility layout. Apps without UIScene support also get a small scene shim (FDSceneFix).")
+			)
 		}
 	}
 	

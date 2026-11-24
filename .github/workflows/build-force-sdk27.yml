@@ -1,0 +1,48 @@
+name: Build (Force SDK 27)
+
+on:
+  push:
+    branches:
+      - force-sdk-27
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: 'true'
+
+      - name: Select Xcode
+        run: |
+          XCODE=/Applications/Xcode_26.3.0.app
+          [ -d "$XCODE" ] || XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Build
+        run: |
+          agvtool new-version -all $(git rev-parse HEAD)
+          make iphoneos
+
+      - name: Force Feather itself to the iOS 27.1 SDK (native iPhone Duo layout)
+        run: |
+          APP=_build/Payload/Feather.app
+          EXE="$APP/$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Info.plist")"
+          /usr/libexec/PlistBuddy -c 'Print UIApplicationSceneManifest' "$APP/Info.plist" > /dev/null
+          vtool -show-build "$EXE" | grep -E 'minos|sdk'
+          python3 -I Tools/FDSceneFix/set_sdk.py "$EXE" 27.1.0
+          codesign --force --sign - --timestamp=none "$APP"
+          vtool -show-build "$EXE" | grep -E 'minos|sdk'
+          rm -f packages/Feather.ipa
+          ditto -c -k --sequesterRsrc --keepParent _build/Payload packages/Feather.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feather-forceSDK27
+          path: packages/Feather.ipa
+          if-no-files-found: error

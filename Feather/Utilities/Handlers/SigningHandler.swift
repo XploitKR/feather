@@ -7,6 +7,7 @@
 
 import Foundation
 import ZsignC
+import Zsign
 import UIKit
 import OSLog
 
@@ -88,8 +89,12 @@ final class SigningHandler: NSObject {
 		try await _removePresetFiles(for: movedAppPath)
 		try await _removeWatchIfNeeded(for: movedAppPath)
 		
-		if _options.experiment_supportLiquidGlass {
+		if _options.experiment_supportLiquidGlass && !_options.experiment_forceSDK27 {
 			try await _locateMachosAndChangeToSDK26(for: movedAppPath)
+		}
+		
+		if _options.experiment_forceSDK27 {
+			try await _forceSDK27(for: movedAppPath)
 		}
 		
 		if _options.experiment_replaceSubstrateWithEllekit {
@@ -397,6 +402,60 @@ extension SigningHandler {
 	private func _inject(for app: URL, with options: Options) async throws {
 		let handler = TweakHandler(app: app, options: options)
 		try await handler.getInputFiles()
+	}
+	
+	/// Forces the main executable to the iOS 27.1 SDK (native iPhone Duo layout).
+	/// The iOS 27 SDK makes UIScene adoption mandatory, so apps without a scene manifest
+	/// (legacy AppDelegate window lifecycle) also get FDSceneFix: a scene manifest naming
+	/// FDSceneDelegate plus the embedded shim dylib, injected into the main executable.
+	private func _forceSDK27(for app: URL) async throws {
+		guard let executable = Bundle(url: app)?.executableURL else {
+			Logger.signing.error("Force SDK 27: main executable not found")
+			return
+		}
+		
+		if let error = LCPatchMachOSDKVersion(executable.path, FDSceneFix.sdk27_1) {
+			Logger.signing.error("Force SDK 27: \(error)")
+			return
+		}
+		
+		let infoURL = app.appendingPathComponent("Info.plist")
+		guard
+			let info = NSMutableDictionary(contentsOf: infoURL),
+			info["UIApplicationSceneManifest"] == nil
+		else {
+			return // already scene based, the SDK patch alone is enough
+		}
+		
+		guard let dylib = FDSceneFix.dylibData else {
+			Logger.signing.error("Force SDK 27: embedded FDSceneFix is corrupted")
+			return
+		}
+		
+		let frameworks = app.appendingPathComponent("Frameworks")
+		try _fileManager.createDirectoryIfNeeded(at: frameworks)
+		try dylib.write(to: frameworks.appendingPathComponent(FDSceneFix.fileName), options: .atomic)
+		
+		guard Zsign.injectDyLib(
+			appExecutable: executable.path,
+			with: "@executable_path/Frameworks/\(FDSceneFix.fileName)"
+		) else {
+			Logger.signing.error("Force SDK 27: failed to inject FDSceneFix")
+			return
+		}
+		
+		var configuration: [String: Any] = [
+			"UISceneConfigurationName": "Default Configuration",
+			"UISceneDelegateClassName": FDSceneFix.delegateClassName
+		]
+		if let storyboard = (info["UIMainStoryboardFile~iphone"] ?? info["UIMainStoryboardFile"]) as? String {
+			configuration["UISceneStoryboardFile"] = storyboard
+		}
+		info["UIApplicationSceneManifest"] = [
+			"UIApplicationSupportsMultipleScenes": false,
+			"UISceneConfigurations": ["UIWindowSceneSessionRoleApplication": [configuration]]
+		]
+		try info.write(to: infoURL)
 	}
 	
 	private func _locateMachosAndChangeToSDK26(for app: URL) async throws {
