@@ -62,7 +62,17 @@ struct InstallPreviewView: View {
 					if _serverMethod == 0 {
 						UIApplication.shared.open(URL(string: installer.iTunesLink)!)
 					} else if _serverMethod == 1 {
-						_isWebviewPresenting = true
+						// Open the external-manifest link directly (the system fetches the manifest
+						// from api.palera.in, then the payload from this device). Presenting it
+						// through the in-app Safari page stalled on IPv6-only cellular, where the
+						// popup never appeared; keep that page only as a fallback.
+						if let url = URL(string: installer.iTunesLinkExternal) {
+							UIApplication.shared.open(url) { opened in
+								if !opened { _isWebviewPresenting = true }
+							}
+						} else {
+							_isWebviewPresenting = true
+						}
 					}
 				}
 				
