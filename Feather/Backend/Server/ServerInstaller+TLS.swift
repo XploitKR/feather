@@ -104,13 +104,16 @@ extension ServerInstaller {
 		return nil
 	}
 	
-	/// LAN IPv4 used by the Semi Local server. Prefers Wi-Fi (en0) over cellular (pdp_ip0) and
-	/// skips addresses the device cannot be reached on: 192.0.0.0/29 is the 464XLAT CLAT range
-	/// (RFC 7335) that iOS assigns on IPv6-only cellular/Wi-Fi (e.g. 192.0.0.2), and 169.254.0.0/16
-	/// is link-local. Returns nil when nothing usable exists, so callers fall back to 127.0.0.1.
+	/// Device address used by the Semi Local server, as a URL host.
+	///
+	/// Order: Wi-Fi IPv4, cellular IPv4, Wi-Fi IPv6, cellular IPv6. IPv4 skips 192.0.0.0/29, the
+	/// 464XLAT CLAT range (RFC 7335) iOS assigns on IPv6-only networks (e.g. 192.0.0.2), which
+	/// installd cannot reach, and 169.254.0.0/16. IPv6 only takes global (2000::/3) or ULA
+	/// (fc00::/7) addresses and is returned bracketed ("[2001:db8::1]") for URLComponents.host.
+	/// On IPv6-only cellular this yields the device's own IPv6 address; the server listens on
+	/// "::" so it is reachable there. Returns nil when nothing usable exists (-> 127.0.0.1).
 	static func getLocalAddress() -> String? {
-		var wifi: String?
-		var cellular: String?
+		var candidates: [String: String] = [:] // "en0.4", "pdp_ip0.4", "en0.6", "pdp_ip0.6"
 		var ifaddr: UnsafeMutablePointer<ifaddrs>?
 		
 		guard getifaddrs(&ifaddr) == 0 else {
@@ -122,22 +125,36 @@ extension ServerInstaller {
 		while let interface = ptr?.pointee {
 			defer { ptr = interface.ifa_next }
 			
-			guard
-				let addr = interface.ifa_addr,
-				addr.pointee.sa_family == UInt8(AF_INET)
-			else {
+			guard let addr = interface.ifa_addr else {
 				continue
 			}
-			
 			let name = String(cString: interface.ifa_name)
 			guard name == "en0" || name == "pdp_ip0" else {
 				continue
 			}
 			
-			let ipv4 = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
-				UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
+			let family = addr.pointee.sa_family
+			let key: String
+			if family == UInt8(AF_INET) {
+				let ipv4 = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+					UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
+				}
+				if (ipv4 & 0xFFFF_FFF8) == 0xC000_0000 || (ipv4 & 0xFFFF_0000) == 0xA9FE_0000 {
+					continue
+				}
+				key = name + ".4"
+			} else if family == UInt8(AF_INET6) {
+				let first = addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
+					$0.pointee.sin6_addr.__u6_addr.__u6_addr8.0
+				}
+				guard (first & 0xE0) == 0x20 || (first & 0xFE) == 0xFC else {
+					continue
+				}
+				key = name + ".6"
+			} else {
+				continue
 			}
-			if (ipv4 & 0xFFFF_FFF8) == 0xC000_0000 || (ipv4 & 0xFFFF_0000) == 0xA9FE_0000 {
+			if candidates[key] != nil {
 				continue
 			}
 			
@@ -149,13 +166,9 @@ extension ServerInstaller {
 			}
 			
 			let address = String(cString: hostname)
-			if name == "en0" {
-				wifi = wifi ?? address
-			} else {
-				cellular = cellular ?? address
-			}
+			candidates[key] = family == UInt8(AF_INET6) ? "[\(address)]" : address
 		}
 		
-		return wifi ?? cellular
+		return ["en0.4", "pdp_ip0.4", "en0.6", "pdp_ip0.6"].lazy.compactMap { candidates[$0] }.first
 	}
 }
