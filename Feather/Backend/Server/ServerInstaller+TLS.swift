@@ -106,14 +106,16 @@ extension ServerInstaller {
 	
 	/// Device address used by the Semi Local server, as a URL host.
 	///
-	/// Order: Wi-Fi IPv4, cellular IPv4, Wi-Fi IPv6, cellular IPv6. IPv4 skips 192.0.0.0/29, the
+	/// Order: Wi-Fi IPv4, LocalDevVPN (10.7.0.1), cellular IPv4, Wi-Fi IPv6, cellular IPv6.
+	/// Without Wi-Fi, iOS does not fetch OTA payloads from this device over cellular paths, so a
+	/// running LocalDevVPN/StosVPN tunnel is preferred when present. IPv4 skips 192.0.0.0/29, the
 	/// 464XLAT CLAT range (RFC 7335) iOS assigns on IPv6-only networks (e.g. 192.0.0.2), which
 	/// installd cannot reach, and 169.254.0.0/16. IPv6 only takes global (2000::/3) or ULA
 	/// (fc00::/7) addresses and is returned bracketed ("[2001:db8::1]") for URLComponents.host.
 	/// On IPv6-only cellular this yields the device's own IPv6 address; the server listens on
 	/// "::" so it is reachable there. Returns nil when nothing usable exists (-> 127.0.0.1).
 	static func getLocalAddress() -> String? {
-		var candidates: [String: String] = [:] // "en0.4", "pdp_ip0.4", "en0.6", "pdp_ip0.6"
+		var candidates: [String: String] = [:] // "en0.4", "vpn", "pdp_ip0.4", "en0.6", "pdp_ip0.6"
 		var ifaddr: UnsafeMutablePointer<ifaddrs>?
 		
 		guard getifaddrs(&ifaddr) == 0 else {
@@ -129,7 +131,8 @@ extension ServerInstaller {
 				continue
 			}
 			let name = String(cString: interface.ifa_name)
-			guard name == "en0" || name == "pdp_ip0" else {
+			let isTunnel = name.hasPrefix("utun")
+			guard name == "en0" || name == "pdp_ip0" || isTunnel else {
 				continue
 			}
 			
@@ -139,11 +142,19 @@ extension ServerInstaller {
 				let ipv4 = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
 					UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
 				}
+				if isTunnel {
+					// LocalDevVPN / StosVPN: the device is 10.7.0.0/24 and packets sent to 10.7.0.1
+					// are reflected back to this device through the tunnel (non-cellular path).
+					if (ipv4 & 0xFFFF_FF00) == 0x0A07_0000 {
+						candidates["vpn"] = "10.7.0.1"
+					}
+					continue
+				}
 				if (ipv4 & 0xFFFF_FFF8) == 0xC000_0000 || (ipv4 & 0xFFFF_0000) == 0xA9FE_0000 {
 					continue
 				}
 				key = name + ".4"
-			} else if family == UInt8(AF_INET6) {
+			} else if family == UInt8(AF_INET6) && !isTunnel {
 				let first = addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
 					$0.pointee.sin6_addr.__u6_addr.__u6_addr8.0
 				}
@@ -169,6 +180,6 @@ extension ServerInstaller {
 			candidates[key] = family == UInt8(AF_INET6) ? "[\(address)]" : address
 		}
 		
-		return ["en0.4", "pdp_ip0.4", "en0.6", "pdp_ip0.6"].lazy.compactMap { candidates[$0] }.first
+		return ["en0.4", "vpn", "pdp_ip0.4", "en0.6", "pdp_ip0.6"].lazy.compactMap { candidates[$0] }.first
 	}
 }
